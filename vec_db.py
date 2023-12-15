@@ -21,8 +21,9 @@ class VecDB:
         if file_path == ".": file_path = tempfile.mkdtemp()
 
         # File paths
-        self.data_path = f"{file_path}/data"
-        self.metadata_path = f"{file_path}/metadata"
+        self.parent_path = file_path
+        self.data_path = f"{self.parent_path}/data"
+        self.metadata_path = f"{self.parent_path}/metadata"
 
         self.monolith_file_path = f"{self.data_path}/monolith"
         self.sample_path = f"{self.data_path}/clustering_sample.npy"
@@ -36,19 +37,24 @@ class VecDB:
 
         # Ratios and parameters
         self.vectors_per_cluster = 500
-        self.nprobe_ratio = 0.05
-        self.clustering_ratio_low_threshold = 1.5
+        self.nprobe_ratio = 0.07
+        self.clustering_ratio_threshold = 1.5
         self.hnsw_efConstruction_ratio = 0.2
         self.hnsw_efSearch_ratio = 3.5
 
         if new_db:
 
-            if os.path.exists(file_path):
-                if os.path.isdir(file_path): rmtree(file_path)
-                else: os.remove(file_path)
+            if os.path.exists(self.parent_path):
+                if os.path.isdir(self.parent_path): rmtree(self.parent_path)
+                else: os.remove(self.parent_path)
 
-            for directory in [file_path, self.metadata_path, self.data_path, self.monolith_file_path]: os.mkdir(directory)
+            for directory in [self.parent_path, self.metadata_path, self.data_path, self.monolith_file_path]: os.mkdir(directory)
             with open(self.num_vectors_db_path, "w") as file: file.write("0\n")
+
+    def __del__(self):
+        if os.path.exists(self.parent_path):
+            if os.path.isdir(self.parent_path): rmtree(self.parent_path)
+            else: os.remove(self.parent_path)
 
     def insert_records(self, rows: List[Dict[int, Annotated[List[float], 70]]], build_index=True):
         
@@ -75,11 +81,25 @@ class VecDB:
         # by setting the parameter build_index to False
         if build_index: self._build_index()
 
-    def get_files_for_clustering(self, reclustering: bool) -> List[List[str]]:
+    def get_vectors_from_files(self, files: List[str], isGraph: bool) -> np.ndarray:
+        
+        data = np.ndarray(shape=(0, 71))
+        for file in files:
+            if isGraph:
+                regionGraph = load(file)
+                regionVectors = np.append(np.array(regionGraph.get_ids_list()).reshape((regionGraph.element_count, 1)), regionGraph.get_items(regionGraph.get_ids_list()), axis=1)
+                data = np.append(data, regionVectors, axis=0)
+            else:
+                data = np.append(data, np.load(file), axis=0)
+
+        return data
+
+    def get_files_for_clustering(self, reclustering: bool, predicting: bool) -> List[List[str]]:
         
         batch_size = 5*(10**5)
         batches = 10
         files = None
+
         if reclustering:
 
             num_vectors_db = 0
@@ -90,25 +110,34 @@ class VecDB:
             # Approximately how many /existing/ vectors per region
             true_vectors_per_cluster = floor(num_vectors_db / num_existing_regions)
 
-            # Regions per 5mil
-            regions_per_5mil = ceil((batches*batch_size) / true_vectors_per_cluster)
-            used_regions = min(regions_per_5mil, num_existing_regions) 
-
-            files = np.random.choice(os.listdir(self.regions_path), size=used_regions, replace=False).tolist()
-            files = [ f"{self.regions_path}/{file}" for file in files ]
-
-            if used_regions == num_existing_regions:
-                files = [ arr.tolist() for arr in np.array_split(files, ceil(batch_size/true_vectors_per_cluster)) ]
+            if predicting:
+                files = [ f"{self.regions_path}/{file}" for file in os.listdir(self.regions_path) ]
+                files = [ arr.tolist() for arr in np.array_split(files, ceil(num_existing_regions / ceil(batch_size/true_vectors_per_cluster))) ]
             else:
-                files = [ arr.tolist() for arr in np.array_split(files, ceil(len(files)/10)) ]
+
+                # Regions per 5mil
+                regions_per_5mil = ceil((batches*batch_size) / true_vectors_per_cluster)
+                used_regions = min(regions_per_5mil, num_existing_regions)
+
+                files = np.random.choice(os.listdir(self.regions_path), size=used_regions, replace=False).tolist()
+                files = [ f"{self.regions_path}/{file}" for file in files ]
+
+                if used_regions == num_existing_regions:
+                    files = [ arr.tolist() for arr in np.array_split(files, ceil(used_regions / ceil(batch_size/true_vectors_per_cluster))) ]
+                else:
+                    files = [ arr.tolist() for arr in np.array_split(files, ceil(len(files)/10)) ]
 
         else:
-            # Maximum of 10 files (10*0.5mil = 5mil vectors), or the dataset size.
-            files = np.random.choice(os.listdir(self.monolith_file_path), size=min(batches, len(os.listdir(self.monolith_file_path))), replace=False).tolist()
+            if predicting:
+                files = os.listdir(self.monolith_file_path)
+            else:
+                # Maximum of 10 files (10*0.5mil = 5mil vectors), or the dataset size.
+                files = np.random.choice(os.listdir(self.monolith_file_path), size=min(batches, len(os.listdir(self.monolith_file_path))), replace=False).tolist()
+
             files = [ [ f"{self.monolith_file_path}/{file}"] for file in files ]
 
         return files
-    
+
     def retrive(self, query: Annotated[List[float], 70], top_k = 5):
 
         query = np.reshape(query, newshape=(70,))
@@ -164,7 +193,7 @@ class VecDB:
             # If there exists some data that do not yet belong to any region, cluster them
             for file in os.listdir(self.monolith_file_path):
 
-                unclusteredData = np.load("f{self.monolith_file_path}/{file}")
+                unclusteredData = np.load(f"{self.monolith_file_path}/{file}")
                 prediction = kmeans.predict(unclusteredData[:,1:])
 
                 for centroid_index in range(len(kmeans.cluster_centers_)):
@@ -188,9 +217,9 @@ class VecDB:
                 os.remove(f"{self.monolith_file_path}/{file}")
 
             # If the ratio constraint is violated, re-cluster
-            if (num_vectors_clustered / num) >= 3/2:
+            if (num_vectors_db / num_vectors_clustered) >= self.clustering_ratio_threshold:
                 printIfVerbose("Low threshold ratio violated. Reclustering..")                  
-                reclustering = True                 
+                reclustering = True
             else:  
                 printIfVerbose("No need to recluster now, low threshold ratio not violated. Appending to existing regions..")
                 return
@@ -204,18 +233,10 @@ class VecDB:
         batch_size = 5*(10**5)
         kmeans = MiniBatchKMeans(init='k-means++', n_clusters=ncentroids, verbose=True, n_init=1, batch_size=batch_size, compute_labels=False, reassignment_ratio=0.01)
         
-        files = self.get_files_for_clustering(reclustering=reclustering)
-        for l in files:
-            print(f"Clustering vectors from file(s) {file}")
-            data = np.ndarray(shape=(0, 71))
-            if reclustering:
-                for file in l:
-                    regionGraph = load(file)
-                    regionVectors = np.append(np.array(regionGraph.get_ids_list()).reshape((regionGraph.element_count, 1)), regionGraph.get_items(regionGraph.get_ids_list()), axis=1)
-                    data = np.append(data, regionVectors, axis=0)
-            else:
-                for file in l:  data = np.append(data, np.load(file), axis=0)
-
+        files = self.get_files_for_clustering(reclustering=reclustering, predicting=False)
+        for files_list in files:
+            data = self.get_vectors_from_files(files=files_list, isGraph=reclustering)
+            print(f"Clustering vectors from file(s) {files_list}. Data shape = {data.shape}")
             kmeans = kmeans.partial_fit(data[:, 1:])
 
         # Saving kmeans model to disk, for use later when inserting new records.
@@ -237,15 +258,15 @@ class VecDB:
         # Predict the clusters of all data points and create region files.
         os.mkdir(self.temp_regions_path)
 
-        for file in os.listdir(self.monolith_file_path):
+        for files_list in self.get_files_for_clustering(reclustering=reclustering, predicting=True):
             
-            data = np.load(f"{self.monolith_file_path}/{file}")
+            data = self.get_vectors_from_files(files=files_list, isGraph=reclustering)
             prediction = kmeans.predict(data[:, 1:])
             for centroid_index in range(len(kmeans.cluster_centers_)):
-                
+
                 belonging_samples = np.where(prediction == centroid_index)[0]
                 if belonging_samples.shape[0] == 0: continue
-                
+
                 # Construct the HNSW graph for this region
                 if os.path.exists(f"{self.temp_regions_path}/{centroid_index}"):
                     regionGraph = load(f"{self.temp_regions_path}/{centroid_index}")
@@ -261,8 +282,8 @@ class VecDB:
                 # Dumping the graph to the disk
                 dump(regionGraph, f"{self.temp_regions_path}/{centroid_index}")
                 del regionGraph
-            
-            os.remove(f"{self.monolith_file_path}/{file}")
+
+            for file in files_list: os.remove(file)
 
         # Deleting the old region files only after clustering is finished, when the files are no longer needed.
         # Remember: we are loading those files through memmaps, they are not fully in memory, so we can't delete them earlier. 
