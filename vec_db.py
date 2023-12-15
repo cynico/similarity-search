@@ -37,10 +37,10 @@ class VecDB:
 
         # Ratios and parameters
         self.vectors_per_cluster = 500
-        self.nprobe_ratio = 0.07
+        self.nprobe_ratio = 0.05
         self.clustering_ratio_threshold = 1.5
         self.hnsw_efConstruction_ratio = 0.2
-        self.hnsw_efSearch_ratio = 3.5
+        self.hnsw_efSearch_ratio = 4
 
         if new_db:
 
@@ -146,7 +146,7 @@ class VecDB:
         nprobe = ceil(self.nprobe_ratio * kmeans.cluster_centers_.shape[0])
         
         # Probing 0.05 of the clusters, with a lower limit of 40 and an upper limit of 80
-        nprobe = min(max(40, min(nprobe, 80)), kmeans.cluster_centers_.shape[0])
+        nprobe = min(max(40, min(nprobe, 500)), kmeans.cluster_centers_.shape[0])
 
         # Get the closest nprobe centroids
         printIfVerbose(f"Probing {nprobe} clusters out of {kmeans.cluster_centers_.shape[0]} clusters")
