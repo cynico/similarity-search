@@ -10,7 +10,7 @@ import hnswlib
 import tempfile
 import uuid
 
-verbose = True
+verbose = False
 def printIfVerbose(message):
     if (verbose): print(message)
 
@@ -231,12 +231,12 @@ class VecDB:
         # present in the database in smaller than a certain threshold: redo the clustering
         ncentroids = ceil(num_vectors_db / self.vectors_per_cluster)
         batch_size = 5*(10**5)
-        kmeans = MiniBatchKMeans(init='k-means++', n_clusters=ncentroids, verbose=True, n_init=1, batch_size=batch_size, compute_labels=False, reassignment_ratio=0.01)
+        kmeans = MiniBatchKMeans(init='k-means++', n_clusters=ncentroids, verbose=verbose, n_init=1, batch_size=batch_size, compute_labels=False, reassignment_ratio=0.01)
         
         files = self.get_files_for_clustering(reclustering=reclustering, predicting=False)
         for files_list in files:
             data = self.get_vectors_from_files(files=files_list, isGraph=reclustering)
-            print(f"Clustering vectors from file(s) {files_list}. Data shape = {data.shape}")
+            printIfVerbose(f"Clustering vectors from file(s) {files_list}. Data shape = {data.shape}")
             kmeans = kmeans.partial_fit(data[:, 1:])
 
         # Saving kmeans model to disk, for use later when inserting new records.
@@ -291,10 +291,3 @@ class VecDB:
         os.rename(self.temp_regions_path, self.regions_path)
 
         printIfVerbose("Finished building index")
-
-if __name__ == "__main__":
-
-    verbose = True
-    new_db = False
-    vecdb = VecDB(new_db=new_db, file_path="1m")
-    print(vecdb.retrive(np.random.uniform(-1, 1, size=(1,70)), top_k=5))
