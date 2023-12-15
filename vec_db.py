@@ -17,7 +17,8 @@ def printIfVerbose(message):
 class VecDB:
     def __init__(self, new_db = True, file_path=".") -> None:
 
-
+        # If no file_path is passed, default file_path is current directory.
+        # If that is the case, create a temporary directory and make it the parent directory for the db.
         if file_path == ".": file_path = tempfile.mkdtemp()
 
         # File paths
@@ -36,11 +37,15 @@ class VecDB:
         self.num_vectors_clustered_path = f"{self.metadata_path}/num_vectors_clustered.txt"
 
         # Ratios and parameters
-        self.vectors_per_cluster = 500
-        self.nprobe_ratio = 0.05
-        self.clustering_ratio_threshold = 1.5
-        self.hnsw_efConstruction_ratio = 0.2
-        self.hnsw_efSearch_ratio = 4
+        self.vectors_per_cluster = 500 # How many vectors per cluster
+        
+        self.nprobe_ratio = 0.05 # Controls the number of clusters with closest centroids to search during query retrieval.
+        self.minimum_clusters_to_search = 40 # Minimum number of clusters to search during query retrieval.
+        self.maximum_clusters_to_search = 500 # Maximum number of clusters to search during query retrieval.
+
+        self.clustering_ratio_threshold = 1.5 # Controls when the re-clustering should happen. 
+        self.hnsw_efConstruction_ratio = 0.2 # An HNSW-related graph construction parameter.
+        self.hnsw_efSearch_ratio = 4 # An HNSW-related graph query parameter. This (roughly) controls how many nearest neighbour to search.
 
         if new_db:
 
@@ -51,15 +56,13 @@ class VecDB:
             for directory in [self.parent_path, self.metadata_path, self.data_path, self.monolith_file_path]: os.mkdir(directory)
             with open(self.num_vectors_db_path, "w") as file: file.write("0\n")
 
-    def __del__(self):
-        if os.path.exists(self.parent_path):
-            if os.path.isdir(self.parent_path): rmtree(self.parent_path)
-            else: os.remove(self.parent_path)
+    # def __del__(self):
+    #     if os.path.exists(self.parent_path):
+    #         if os.path.isdir(self.parent_path): rmtree(self.parent_path)
+    #         else: os.remove(self.parent_path)
 
     def insert_records(self, rows: List[Dict[int, Annotated[List[float], 70]]], build_index=True):
         
-        # We are merging the id and the vector together in one array so that we can save the file to disk
-        # The resultant vector has the dimension 71, with the first element being the id
         chunk_size = 5*(10**5)
         num_iterations = ceil(len(rows)/chunk_size)
 
@@ -81,6 +84,9 @@ class VecDB:
         # by setting the parameter build_index to False
         if build_index: self._build_index()
 
+    # Returns a list of vectors loaded from the given list of files.
+    # isGraph indicates whether those files are graph files (during reclustering), or npy files (first time
+    # clustering).
     def get_vectors_from_files(self, files: List[str], isGraph: bool) -> np.ndarray:
         
         data = np.ndarray(shape=(0, 71))
@@ -94,6 +100,12 @@ class VecDB:
 
         return data
 
+    # Return a list of list of files to use the vectors within for clustering.
+    # This is supposed to hide the implementation detail of whether we are clustering for the first time
+    # and thus from the files under data/monolith, or reclustering with files of existing regions under
+    # data/regions. It tries to return files containing up to 5mil vectors, or the whole dataset if its size is 
+    # less than 5mil.
+    # Every list has files containing around 500k vectors, used as one batch in MiniBatchKMeans
     def get_files_for_clustering(self, reclustering: bool, predicting: bool) -> List[List[str]]:
         
         batch_size = 5*(10**5)
@@ -145,8 +157,8 @@ class VecDB:
         kmeans : MiniBatchKMeans = load(self.kmeans_path)
         nprobe = ceil(self.nprobe_ratio * kmeans.cluster_centers_.shape[0])
         
-        # Probing 0.05 of the clusters, with a lower limit of 40 and an upper limit of 80
-        nprobe = min(max(40, min(nprobe, 500)), kmeans.cluster_centers_.shape[0])
+        # Probing self.nprobe of the clusters, with a lower limit of self.minimum_clusters_to_search and an upper limit of self.maximum_clusters_to_search
+        nprobe = min(max(self.minimum_clusters_to_search, min(nprobe, self.maximum_clusters_to_search)), kmeans.cluster_centers_.shape[0])
 
         # Get the closest nprobe centroids
         printIfVerbose(f"Probing {nprobe} clusters out of {kmeans.cluster_centers_.shape[0]} clusters")
@@ -226,9 +238,12 @@ class VecDB:
         else:
             printIfVerbose("First time clustering..")
         
+        #### 
         # If this is the first time indexing, or the ratio of vectors involved
         # in clustering in the current index to the vectors currently
         # present in the database in smaller than a certain threshold: redo the clustering
+        ####
+
         ncentroids = ceil(num_vectors_db / self.vectors_per_cluster)
         batch_size = 5*(10**5)
         kmeans = MiniBatchKMeans(init='k-means++', n_clusters=ncentroids, verbose=verbose, n_init=1, batch_size=batch_size, compute_labels=False, reassignment_ratio=0.01)
@@ -257,7 +272,6 @@ class VecDB:
 
         # Predict the clusters of all data points and create region files.
         os.mkdir(self.temp_regions_path)
-
         for files_list in self.get_files_for_clustering(reclustering=reclustering, predicting=True):
             
             data = self.get_vectors_from_files(files=files_list, isGraph=reclustering)
@@ -285,8 +299,8 @@ class VecDB:
 
             for file in files_list: os.remove(file)
 
-        # Deleting the old region files only after clustering is finished, when the files are no longer needed.
-        # Remember: we are loading those files through memmaps, they are not fully in memory, so we can't delete them earlier. 
+        # Deleting the old region directory. rmtree() instead of rmdir() for extra caution,
+        # even though region files should've been already deleted above.
         if os.path.exists(self.regions_path): rmtree(self.regions_path)
         os.rename(self.temp_regions_path, self.regions_path)
 
